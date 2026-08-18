@@ -1,75 +1,78 @@
 import os
-import io
-import json
+import base64
 import hashlib
-import secrets
-import urllib.request
-import urllib.error
+import requests
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
+from dotenv import load_dotenv
 
 
-# --------------------------------------------------
-# Load environment variables
-# --------------------------------------------------
+# ============================================================
+# LOAD ENVIRONMENT VARIABLES
+# ============================================================
 
 load_dotenv()
 
-openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-netlify_token = os.getenv("NETLIFY_AUTH_TOKEN")
-
-if not openrouter_api_key:
-    raise RuntimeError(
-        "OPENROUTER_API_KEY is missing from .env"
-    )
-
-if not netlify_token:
-    raise RuntimeError(
-        "NETLIFY_AUTH_TOKEN is missing from .env"
-    )
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+NETLIFY_AUTH_TOKEN = os.getenv("NETLIFY_AUTH_TOKEN")
 
 
-# --------------------------------------------------
-# OpenRouter client
-# --------------------------------------------------
+# ============================================================
+# FASTAPI APP
+# ============================================================
 
-client = OpenAI(
-    api_key=openrouter_api_key,
-    base_url="https://openrouter.ai/api/v1",
+app = FastAPI(
+    title="VibeBuilder AI",
+    description="AI Website Generator Backend",
+    version="1.0.0"
 )
 
 
-# --------------------------------------------------
-# FastAPI
-# --------------------------------------------------
-
-app = FastAPI(title="VibeBuilder AI")
-
-
-# --------------------------------------------------
+# ============================================================
 # CORS
-# --------------------------------------------------
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
-   allow_origins=[
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "https://vibebuil.netlify.app",
-],
+
+    allow_origins=[
+        "https://vibebuil.netlify.app",
+        "https://www.vibebuil.netlify.app",
+
+        # Local development
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# --------------------------------------------------
-# Request models
-# --------------------------------------------------
+# ============================================================
+# OPENROUTER CLIENT
+# ============================================================
+
+if not OPENROUTER_API_KEY:
+    print("WARNING: OPENROUTER_API_KEY is not set")
+
+client = OpenAI(
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1"
+)
+
+
+# ============================================================
+# REQUEST MODELS
+# ============================================================
 
 class GenerateRequest(BaseModel):
     prompt: str
@@ -84,20 +87,21 @@ class PublishRequest(BaseModel):
     html: str
 
 
-# --------------------------------------------------
-# Root
-# --------------------------------------------------
+# ============================================================
+# ROOT
+# ============================================================
 
 @app.get("/")
 def root():
     return {
-        "message": "VibeBuilder AI backend is running"
+        "message": "VibeBuilder AI backend is running",
+        "status": "ok"
     }
 
 
-# --------------------------------------------------
-# Health
-# --------------------------------------------------
+# ============================================================
+# HEALTH
+# ============================================================
 
 @app.get("/health")
 def health():
@@ -106,9 +110,9 @@ def health():
     }
 
 
-# ==================================================
-# GENERATE
-# ==================================================
+# ============================================================
+# GENERATE WEBSITE
+# ============================================================
 
 @app.post("/generate")
 def generate_website(request: GenerateRequest):
@@ -119,6 +123,12 @@ def generate_website(request: GenerateRequest):
             detail="Prompt cannot be empty"
         )
 
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="OPENROUTER_API_KEY is not configured on the server"
+        )
+
     system_prompt = """
 You are VibeBuilder AI, an expert web developer.
 
@@ -127,6 +137,7 @@ Create a complete single-page website from the user's request.
 Return ONLY the complete HTML document.
 
 Requirements:
+
 - HTML5
 - Responsive design
 - Modern polished UI
@@ -137,12 +148,15 @@ Requirements:
 - Do not use Markdown
 - Do not explain anything
 - Return only valid HTML
+- Start with <!DOCTYPE html>
+- End with </html>
 """
 
     try:
 
         response = client.chat.completions.create(
             model="openai/gpt-oss-20b:free",
+
             messages=[
                 {
                     "role": "system",
@@ -153,45 +167,50 @@ Requirements:
                     "content": request.prompt
                 }
             ],
-            max_tokens=5000,
+
+            temperature=0.7
         )
 
-        website = response.choices[0].message.content
+        html = response.choices[0].message.content
 
-        if not website:
-            raise Exception(
-                "AI returned empty HTML."
+        if not html:
+            raise HTTPException(
+                status_code=500,
+                detail="AI returned empty response"
             )
 
-        website = website.strip()
+        # Remove Markdown code fences if AI accidentally adds them
+        html = html.strip()
 
-        if website.startswith("```html"):
-            website = website[7:]
+        if html.startswith("```html"):
+            html = html[7:]
 
-        elif website.startswith("```"):
-            website = website[3:]
+        elif html.startswith("```"):
+            html = html[3:]
 
-        if website.endswith("```"):
-            website = website[:-3]
+        if html.endswith("```"):
+            html = html[:-3]
 
-        website = website.strip()
+        html = html.strip()
 
         return {
             "success": True,
-            "html": website
+            "html": html
         }
 
     except Exception as e:
 
+        print("GENERATION ERROR:", str(e))
+
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=f"AI generation failed: {str(e)}"
         )
 
 
-# ==================================================
-# EDIT
-# ==================================================
+# ============================================================
+# EDIT WEBSITE
+# ============================================================
 
 @app.post("/edit")
 def edit_website(request: EditRequest):
@@ -199,7 +218,7 @@ def edit_website(request: EditRequest):
     if not request.html.strip():
         raise HTTPException(
             status_code=400,
-            detail="Website HTML cannot be empty"
+            detail="HTML cannot be empty"
         )
 
     if not request.instruction.strip():
@@ -208,44 +227,50 @@ def edit_website(request: EditRequest):
             detail="Edit instruction cannot be empty"
         )
 
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="OPENROUTER_API_KEY is not configured"
+        )
+
     system_prompt = """
-You are VibeBuilder AI, an expert web developer.
+You are VibeBuilder AI.
 
-You will receive an existing HTML website and an instruction describing
-changes the user wants.
+You are editing an existing HTML website.
 
-Modify the existing website according to the instruction.
+Return ONLY the complete modified HTML document.
 
-Requirements:
-- Preserve the existing website unless changes are requested.
-- Return the complete updated HTML document.
-- Use HTML5.
-- Keep CSS inside <style>.
-- Keep JavaScript inside <script> when needed.
+Rules:
+
+- Preserve existing functionality unless the user asks to change it.
+- Apply the user's requested changes.
 - Keep the website responsive.
-- Make the design visually polished.
-- Use reliable external image URLs when images are needed.
-- Do not use Markdown code fences.
+- Keep CSS inside <style>.
+- Keep JavaScript inside <script>.
+- Do not use Markdown.
 - Do not explain anything.
-- Return ONLY valid HTML.
+- Return only valid HTML.
+- Start with <!DOCTYPE html>.
+- End with </html>.
 """
 
     user_prompt = f"""
-Existing website:
+Here is the existing website:
 
 {request.html}
 
-User requested change:
+User's requested change:
 
 {request.instruction}
 
-Return the complete updated HTML document.
+Return the complete updated HTML.
 """
 
     try:
 
         response = client.chat.completions.create(
             model="openai/gpt-oss-20b:free",
+
             messages=[
                 {
                     "role": "system",
@@ -256,97 +281,49 @@ Return the complete updated HTML document.
                     "content": user_prompt
                 }
             ],
-            max_tokens=5000,
+
+            temperature=0.7
         )
 
-        website = response.choices[0].message.content
+        html = response.choices[0].message.content
 
-        if not website:
-            raise Exception(
-                "AI returned empty HTML."
+        if not html:
+            raise HTTPException(
+                status_code=500,
+                detail="AI returned empty response"
             )
 
-        website = website.strip()
+        html = html.strip()
 
-        if website.startswith("```html"):
-            website = website[7:]
+        if html.startswith("```html"):
+            html = html[7:]
 
-        elif website.startswith("```"):
-            website = website[3:]
+        elif html.startswith("```"):
+            html = html[3:]
 
-        if website.endswith("```"):
-            website = website[:-3]
+        if html.endswith("```"):
+            html = html[:-3]
 
-        website = website.strip()
+        html = html.strip()
 
         return {
             "success": True,
-            "html": website
+            "html": html
         }
 
     except Exception as e:
 
+        print("EDIT ERROR:", str(e))
+
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=f"AI editing failed: {str(e)}"
         )
 
 
-# ==================================================
-# NETLIFY HELPERS
-# ==================================================
-
-def netlify_request(
-    url,
-    method="GET",
-    data=None,
-    content_type="application/json"
-):
-
-    headers = {
-        "Authorization": f"Bearer {netlify_token}",
-        "Accept": "application/json",
-        "User-Agent": "VibeBuilder AI",
-    }
-
-    if content_type:
-        headers["Content-Type"] = content_type
-
-    request = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
-        headers=headers,
-    )
-
-    try:
-
-        with urllib.request.urlopen(
-            request
-        ) as response:
-
-            body = response.read()
-
-            return json.loads(
-                body.decode("utf-8")
-            )
-
-    except urllib.error.HTTPError as e:
-
-        error_body = e.read().decode(
-            "utf-8",
-            errors="ignore"
-        )
-
-        raise Exception(
-            f"Netlify API error {e.code}: "
-            f"{error_body}"
-        )
-
-
-# ==================================================
-# PUBLISH
-# ==================================================
+# ============================================================
+# PUBLISH TO NETLIFY
+# ============================================================
 
 @app.post("/publish")
 def publish_website(request: PublishRequest):
@@ -354,129 +331,137 @@ def publish_website(request: PublishRequest):
     if not request.html.strip():
         raise HTTPException(
             status_code=400,
-            detail="Website HTML cannot be empty"
+            detail="HTML cannot be empty"
+        )
+
+    if not NETLIFY_AUTH_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="NETLIFY_AUTH_TOKEN is not configured on the server"
         )
 
     try:
 
-        # --------------------------------------------------
-        # 1. Create Netlify site
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Create a Netlify site
+        # ----------------------------------------------------
 
-        site_name = (
-            f"vibebuilder-"
-            f"{secrets.token_hex(4)}"
-        )
+        headers = {
+            "Authorization": f"Bearer {NETLIFY_AUTH_TOKEN}",
+            "Content-Type": "application/json"
+        }
 
-        create_data = json.dumps({
-            "name": site_name
-        }).encode("utf-8")
-
-        site_data = netlify_request(
+        create_site_response = requests.post(
             "https://api.netlify.com/api/v1/sites",
-            method="POST",
-            data=create_data,
-            content_type="application/json",
+            headers=headers,
+            json={}
         )
 
-        site_id = site_data.get("id")
+        if create_site_response.status_code not in [200, 201]:
+            print(
+                "NETLIFY CREATE ERROR:",
+                create_site_response.status_code,
+                create_site_response.text
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail=f"Netlify API error: {create_site_response.text}"
+            )
+
+        site = create_site_response.json()
+
+        site_id = site.get("id")
+        site_url = site.get("ssl_url") or site.get("url")
 
         if not site_id:
-            raise Exception(
-                "Netlify did not return a site ID."
+            raise HTTPException(
+                status_code=500,
+                detail="Netlify did not return a site ID"
             )
 
-        # --------------------------------------------------
-        # 2. Prepare index.html
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Prepare index.html
+        # ----------------------------------------------------
 
-        html_bytes = request.html.encode(
-            "utf-8"
-        )
+        file_content = request.html.encode("utf-8")
 
-        # SHA1 is used by Netlify's file API
-        file_hash = hashlib.sha1(
-            html_bytes
-        ).hexdigest()
+        file_hash = hashlib.sha1(file_content).hexdigest()
 
-        # --------------------------------------------------
-        # 3. Ask Netlify which files it needs
-        # --------------------------------------------------
+        files_payload = {
+            "index.html": file_hash
+        }
 
-        deploy_data = json.dumps({
-            "files": {
-                "index.html": file_hash
+        # ----------------------------------------------------
+        # Create deploy
+        # ----------------------------------------------------
+
+        deploy_response = requests.post(
+            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
+            headers=headers,
+            json={
+                "files": files_payload
             }
-        }).encode("utf-8")
-
-        deploy_url = (
-            f"https://api.netlify.com/api/v1/"
-            f"sites/{site_id}/deploys"
         )
 
-        deploy_info = netlify_request(
-            deploy_url,
-            method="POST",
-            data=deploy_data,
-            content_type="application/json",
-        )
-
-        required_files = deploy_info.get(
-            "required",
-            []
-        )
-
-        # --------------------------------------------------
-        # 4. Upload required file
-        # --------------------------------------------------
-
-        if file_hash in required_files:
-
-            upload_url = (
-                f"https://api.netlify.com/api/v1/"
-                f"deploys/{deploy_info['id']}"
-                f"/files/index.html"
+        if deploy_response.status_code not in [200, 201]:
+            print(
+                "NETLIFY DEPLOY ERROR:",
+                deploy_response.status_code,
+                deploy_response.text
             )
 
-            netlify_request(
-                upload_url,
-                method="PUT",
-                data=html_bytes,
-                content_type="application/octet-stream",
+            raise HTTPException(
+                status_code=500,
+                detail=f"Netlify deploy error: {deploy_response.text}"
             )
 
-        # --------------------------------------------------
-        # 5. Determine URL
-        # --------------------------------------------------
+        deploy = deploy_response.json()
 
-        public_url = (
-            site_data.get("ssl_url")
-            or site_data.get("url")
+        deploy_id = deploy.get("id")
+
+        # ----------------------------------------------------
+        # Upload index.html
+        # ----------------------------------------------------
+
+        upload_headers = {
+            "Authorization": f"Bearer {NETLIFY_AUTH_TOKEN}",
+            "Content-Type": "application/octet-stream"
+        }
+
+        upload_response = requests.put(
+            f"https://api.netlify.com/api/v1/deploys/{deploy_id}/files/index.html",
+            headers=upload_headers,
+            data=file_content
         )
 
-        if not public_url:
-
-            public_url = (
-                f"https://"
-                f"{site_name}"
-                f".netlify.app"
+        if upload_response.status_code not in [200, 201]:
+            print(
+                "NETLIFY UPLOAD ERROR:",
+                upload_response.status_code,
+                upload_response.text
             )
 
-        # --------------------------------------------------
-        # 6. Return result
-        # --------------------------------------------------
+            raise HTTPException(
+                status_code=500,
+                detail=f"Netlify upload error: {upload_response.text}"
+            )
 
         return {
             "success": True,
-            "url": public_url,
+            "url": site_url,
             "site_id": site_id,
-            "site_name": site_name,
-            "deploy_id": deploy_info.get("id"),
+            "deploy_id": deploy_id
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
 
+        print("PUBLISH ERROR:", str(e))
+
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=f"Publishing failed: {str(e)}"
         )
