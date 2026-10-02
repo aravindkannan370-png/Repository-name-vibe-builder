@@ -63,7 +63,8 @@ function App() {
 
     try {
       const response = await fetch(
-        "https://repository-name-vibe-builder-2.onrender.com/generate",
+        "http://127.0.0.1:8000/generate"
+        ,
         {
           method: "POST",
           headers: {
@@ -128,7 +129,7 @@ function App() {
 
     try {
       const response = await fetch(
-        "https://repository-name-vibe-builder-2.onrender.com/edit",
+        "http://127.0.0.1:8000/edit",
         {
           method: "POST",
           headers: {
@@ -313,7 +314,7 @@ function App() {
 
     try {
       const response = await fetch(
-       "https://repository-name-vibe-builder-2.onrender.com/publish",
+      "http://127.0.0.1:8000/publish",
         {
           method: "POST",
           headers: {
